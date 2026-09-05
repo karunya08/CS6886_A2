@@ -22,7 +22,7 @@ def sweep_run():
         CHECKPOINT_PATH,
         weight_bits=config.weight_bits,
         act_bits=config.act_bits,
-        finetune_epochs=1,
+        finetune_epochs=2,
     )
 
     wandb.log(result)
