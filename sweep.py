@@ -2,7 +2,7 @@
 import wandb
 from compress import run_compression
 
-CHECKPOINT_PATH = "/content/drive/MyDrive/CS6886_A2/baseline_best.pt"
+CHECKPOINT_PATH = "baseline_best.pt"
 
 sweep_config = {
     "method": "grid",
