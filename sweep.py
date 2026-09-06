@@ -1,21 +1,41 @@
-
+import sys
 import wandb
+
 from compress import run_compression
+from pruning import run_structured_pruned_compression
+
 
 CHECKPOINT_PATH = "baseline_best.pt"
 
-sweep_config = {
+
+# ============================================================
+# QUANTIZATION SWEEP
+# ============================================================
+
+quant_sweep_config = {
     "method": "grid",
-    "metric": {"name": "accuracy", "goal": "maximize"},
+
+    "metric": {
+        "name": "accuracy",
+        "goal": "maximize"
+    },
+
     "parameters": {
-        "weight_bits": {"values": [8, 4, 2]},
-        "act_bits": {"values": [8, 4, 2]},
+        "weight_bits": {
+            "values": [8, 4, 2]
+        },
+
+        "act_bits": {
+            "values": [8, 4, 2]
+        },
     },
 }
 
 
-def sweep_run():
+def quant_sweep_run():
+
     wandb.init()
+
     config = wandb.config
 
     result = run_compression(
@@ -28,6 +48,100 @@ def sweep_run():
     wandb.log(result)
 
 
+# ============================================================
+# STRUCTURED PRUNING SWEEP
+# ============================================================
+
+pruning_sweep_config = {
+    "method": "grid",
+
+    "metric": {
+        "name": "accuracy",
+        "goal": "maximize"
+    },
+
+    "parameters": {
+        "sparsity": {
+            "values": [0.25, 0.40, 0.50, 0.60, 0.70]
+        }
+    },
+}
+
+
+def pruning_sweep_run():
+
+    wandb.init()
+
+    config = wandb.config
+
+    result = run_structured_pruned_compression(
+        CHECKPOINT_PATH,
+
+        # Fixed at your selected quantization configuration
+        weight_bits=4,
+        act_bits=8,
+
+        # Swept
+        sparsity=config.sparsity,
+
+        # Fixed
+        min_keep_ratio=0.25,
+
+        num_calib_batches=10,
+
+        quant_finetune_epochs=3,
+        quant_finetune_lr=1e-4,
+
+        prune_finetune_epochs=3,
+        prune_finetune_lr=1e-4,
+
+        device="cuda"
+    )
+
+    wandb.log(result)
+
+
+# ============================================================
+# SELECT SWEEP
+# ============================================================
+
 if __name__ == "__main__":
-    sweep_id = wandb.sweep(sweep_config, project="mobilenetv2-cifar10-compression")
-    wandb.agent(sweep_id, function=sweep_run)
+
+    if len(sys.argv) < 2:
+        print("Usage:")
+        print("  python sweep.py quant")
+        print("  python sweep.py prune")
+        sys.exit(1)
+
+    mode = sys.argv[1].lower()
+
+    if mode == "quant":
+
+        sweep_id = wandb.sweep(
+            quant_sweep_config,
+            project="mobilenetv2-cifar10-compression"
+        )
+
+        wandb.agent(
+            sweep_id,
+            function=quant_sweep_run
+        )
+
+    elif mode == "prune":
+
+        sweep_id = wandb.sweep(
+            pruning_sweep_config,
+            project="mobilenetv2-cifar10-compression"
+        )
+
+        wandb.agent(
+            sweep_id,
+            function=pruning_sweep_run
+        )
+
+    else:
+
+        print(f"Unknown mode: {mode}")
+        print("Use either:")
+        print("  python sweep.py quant")
+        print("  python sweep.py prune")
