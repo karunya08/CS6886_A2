@@ -70,5 +70,5 @@ def run_compression(checkpoint_path, weight_bits=8, act_bits=8, num_calib_batche
 
 
 if __name__ == "__main__":
-    result = run_compression("/content/drive/MyDrive/CS6886_A2/baseline_best.pt", weight_bits=8, act_bits=8, finetune_epochs=5)
+    result = run_compression("baseline_best.pt", weight_bits=8, act_bits=8, finetune_epochs=5)
     print(result)
