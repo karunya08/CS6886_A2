@@ -191,5 +191,5 @@ def run_structured_pruned_compression(checkpoint_path, weight_bits=8, act_bits=4
 
 
 if __name__ == "__main__":
-    result = run_structured_pruned_compression("baseline_best.pt", weight_bits=8, act_bits=4, sparsity=0.5)
+    result = run_structured_pruned_compression("baseline_best.pt", weight_bits=4, act_bits=8, sparsity=0.5)
     print(result)
