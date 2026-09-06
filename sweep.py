@@ -2,7 +2,7 @@ import sys
 import wandb
 
 from compress import run_compression
-from pruning import run_structured_pruned_compression
+from sensitivity_aware_pruning  import run_structured_pruned_compression
 
 
 CHECKPOINT_PATH = "baseline_best.pt"
