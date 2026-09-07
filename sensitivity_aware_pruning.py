@@ -1,166 +1,96 @@
 import torch
 import torch.nn as nn
 
-from baseline import baseline, prepare_data
-from calibrate import run_calibration
-from compress import finetune_quantized
-from eval import run_eval
+from baseline import baseline
+from compression import (
+    replace_with_quantized_layers,
+    calibrate_model,
+    enable_activation_quantization,
+)
+from train import train_model
 from size_accounting import compute_model_size
 
 
 # ============================================================
-# FIND MOBILEV2 INVERTED RESIDUAL BLOCKS
+# BLOCK DISCOVERY
 # ============================================================
 
 def get_inverted_residual_blocks(model):
-    """
-    Find torchvision MobileNetV2 InvertedResidual blocks.
+    blocks = []
 
-    We use the class name rather than importing torchvision's
-    internal class directly.
-    """
+    for name, module in model.named_modules():
+        if module.__class__.__name__ == "InvertedResidual":
+            blocks.append((name, module))
 
-    return [
-        (name, m)
-        for name, m in model.named_modules()
-        if type(m).__name__ == "InvertedResidual"
-    ]
+    return blocks
 
 
 def has_expand_stage(block):
-    """
-    Expansion blocks have:
-
-        [expand, depthwise, project_conv, project_bn]
-
-    while expand_ratio == 1 blocks have:
-
-        [depthwise, project_conv, project_bn]
-
-    We only prune blocks with an explicit expansion stage.
-    """
-
-    return len(block.conv) == 4
+    return hasattr(block, "conv") and len(block.conv) == 4
 
 
-# ============================================================
-# GET PRUNING TARGETS
-# ============================================================
-
-def get_prune_targets(block):
-    """
-    Return the layers associated with the internal expansion dimension.
-
-        expand_conv
-        expand_bn
-        depthwise_conv
-        depthwise_bn
-        project_conv
-    """
-
-    expand_conv, expand_bn = block.conv[0][0], block.conv[0][1]
-
-    dw_conv, dw_bn = block.conv[1][0], block.conv[1][1]
-
-    project_conv = block.conv[2]
-
-    return (
-        expand_conv,
-        expand_bn,
-        dw_conv,
-        dw_bn,
-        project_conv
-    )
-
-
-# ============================================================
-# CHANNEL IMPORTANCE
-# ============================================================
-
-def compute_channel_importance(conv_module):
-    """
-    Compute L2 importance for every output channel of the
-    expansion convolution.
-
-    For channel c:
-
-        importance[c] = ||W_c||_2
-
-    where W_c is the complete convolutional filter.
-    """
-
-    W = conv_module.conv.weight.detach()
-
-    return W.view(
-        W.shape[0], -1
-    ).norm(
-        p=2,
-        dim=1
-    )
-
-
-def normalize_importance(importance):
-    """
-    Normalize importance within one block.
-
-    Mean becomes approximately 1.
-
-    This prevents blocks with inherently larger weight magnitudes
-    from dominating the global ranking.
-    """
-
-    return importance / importance.mean().clamp(min=1e-8)
-
-
-# ============================================================
-# COLLECT GLOBAL IMPORTANCE
-# ============================================================
-
-def collect_global_importance(model):
-    """
-    Collect normalized channel importance from every eligible
-    inverted-residual block.
-
-    Returns a list containing:
-
-        (score, block_name, channel_index)
-
-    Example:
-
-        (0.42, 'features.2', 17)
-        (0.73, 'features.2', 31)
-        (1.24, 'features.3', 5)
-        ...
-    """
-
-    records = []
+def get_prune_targets(model):
+    targets = []
 
     for name, block in get_inverted_residual_blocks(model):
 
         if not has_expand_stage(block):
             continue
 
-        expand_conv, _, _, _, _ = get_prune_targets(block)
+        expand = block.conv[0][0]
+
+        if isinstance(expand, nn.Conv2d):
+            targets.append({
+                "name": name,
+                "block": block,
+                "expand": expand,
+            })
+
+    return targets
+
+
+# ============================================================
+# CHANNEL IMPORTANCE
+# ============================================================
+
+def compute_channel_importance(conv):
+    W = conv.weight.detach()
+
+    return torch.norm(
+        W.reshape(W.shape[0], -1),
+        p=2,
+        dim=1
+    )
+
+
+def normalize_importance(importance):
+    return importance / importance.mean().clamp(min=1e-12)
+
+
+def collect_global_importance(model):
+
+    targets = get_prune_targets(model)
+
+    all_scores = []
+
+    for target in targets:
 
         importance = compute_channel_importance(
-            expand_conv
+            target["expand"]
         )
 
-        normalized = normalize_importance(
-            importance
-        )
+        normalized = normalize_importance(importance)
 
-        for channel_idx, score in enumerate(normalized):
+        target["importance"] = normalized
 
-            records.append(
-                (
-                    float(score.item()),
-                    name,
-                    channel_idx
-                )
-            )
+        for idx, score in enumerate(normalized):
+            all_scores.append({
+                "block": target["name"],
+                "channel": idx,
+                "score": score.item(),
+            })
 
-    return records
+    return targets, all_scores
 
 
 # ============================================================
@@ -168,389 +98,230 @@ def collect_global_importance(model):
 # ============================================================
 
 def select_global_keep_indices(
-    model,
+    targets,
+    all_scores,
     sparsity,
-    min_keep_ratio=0.25
+    min_keep_ratio=0.25,
 ):
-    """
-    Globally rank all normalized channel importance scores.
 
-    Target sparsity:
-        e.g. 0.50 means remove 50% of all eligible expansion
-        channels across the network.
+    total_channels = len(all_scores)
 
-    min_keep_ratio:
-        Prevents a single block from being completely destroyed.
-
-        Example:
-            min_keep_ratio=0.25
-
-        means every block must retain at least 25% of its
-        original expansion channels.
-    """
-
-    records = collect_global_importance(model)
-
-    if len(records) == 0:
-        return {}, 0, 0
-
-    # --------------------------------------------------------
-    # Count original channels
-    # --------------------------------------------------------
-
-    n_total = len(records)
-
-    n_to_prune = int(
-        round(sparsity * n_total)
+    target_remove = int(
+        round(total_channels * sparsity)
     )
 
-    # --------------------------------------------------------
-    # Determine minimum number of channels each block must keep
-    # --------------------------------------------------------
+    ranked = sorted(
+        all_scores,
+        key=lambda x: x["score"]
+    )
 
-    block_sizes = {}
-
-    for _, block_name, _ in records:
-
-        if block_name not in block_sizes:
-            block_sizes[block_name] = 0
-
-        block_sizes[block_name] += 1
-
-    min_keep = {
-        name: max(
-            1,
-            int(round(size * min_keep_ratio))
+    keep = {
+        target["name"]: set(
+            range(target["expand"].out_channels)
         )
-        for name, size in block_sizes.items()
+        for target in targets
     }
 
-    # --------------------------------------------------------
-    # Sort globally from least important -> most important
-    # --------------------------------------------------------
+    min_keep = {}
 
-    records.sort(
-        key=lambda x: x[0]
-    )
+    for target in targets:
 
-    # --------------------------------------------------------
-    # Select channels to prune
-    # --------------------------------------------------------
+        n = target["expand"].out_channels
 
-    prune_by_block = {
-        name: set()
-        for name in block_sizes
-    }
+        min_keep[target["name"]] = max(
+            1,
+            int(round(n * min_keep_ratio))
+        )
 
-    current_keep = {
-        name: block_sizes[name]
-        for name in block_sizes
-    }
+    removed = 0
 
-    n_pruned = 0
+    for item in ranked:
 
-    for score, block_name, channel_idx in records:
-
-        if n_pruned >= n_to_prune:
+        if removed >= target_remove:
             break
 
-        # Do not allow this block to fall below
-        # its minimum number of channels.
-        if current_keep[block_name] <= min_keep[block_name]:
+        block_name = item["block"]
+        channel = item["channel"]
+
+        if len(keep[block_name]) <= min_keep[block_name]:
             continue
 
-        prune_by_block[block_name].add(
-            channel_idx
-        )
+        keep[block_name].remove(channel)
+        removed += 1
 
-        current_keep[block_name] -= 1
+    actual_sparsity = removed / total_channels
 
-        n_pruned += 1
-
-    # --------------------------------------------------------
-    # Convert prune indices -> keep indices
-    # --------------------------------------------------------
-
-    keep_indices = {}
-
-    for block_name, n_channels in block_sizes.items():
-
-        prune_set = prune_by_block[block_name]
-
-        keep = [
-            idx
-            for idx in range(n_channels)
-            if idx not in prune_set
-        ]
-
-        keep_indices[block_name] = torch.tensor(
-            keep,
-            dtype=torch.long
-        )
-
-    actual_sparsity = (
-        n_pruned / n_total
-        if n_total > 0
-        else 0.0
-    )
-
-    return (
-        keep_indices,
-        n_pruned,
-        n_total
-    )
+    return keep, actual_sparsity
 
 
 # ============================================================
-# SLICE CONV OUTPUT CHANNELS
+# TENSOR SLICING
 # ============================================================
 
-def slice_conv_out(conv, keep_idx):
-    """
-    Expand convolution:
+def slice_conv_out(conv, keep_indices):
 
-        [Cexp, Cin, 1, 1]
-
-    becomes:
-
-        [Cexp_new, Cin, 1, 1]
-    """
+    idx = torch.tensor(
+        sorted(keep_indices),
+        dtype=torch.long,
+        device=conv.weight.device
+    )
 
     new_conv = nn.Conv2d(
         conv.in_channels,
-        len(keep_idx),
+        len(idx),
         conv.kernel_size,
-        stride=conv.stride,
-        padding=conv.padding,
-        dilation=conv.dilation,
-        groups=conv.groups,
-        bias=conv.bias is not None
-    )
+        conv.stride,
+        conv.padding,
+        conv.dilation,
+        conv.groups,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode,
+    ).to(conv.weight.device)
 
-    new_conv.weight.data = (
-        conv.weight.data[keep_idx].clone()
-    )
+    new_conv.weight.data.copy_(conv.weight.data[idx])
 
     if conv.bias is not None:
-        new_conv.bias.data = (
-            conv.bias.data[keep_idx].clone()
-        )
+        new_conv.bias.data.copy_(conv.bias.data[idx])
 
-    return new_conv.to(
-        conv.weight.device
+    return new_conv
+
+
+def slice_conv_in(conv, keep_indices):
+
+    idx = torch.tensor(
+        sorted(keep_indices),
+        dtype=torch.long,
+        device=conv.weight.device
     )
 
-
-# ============================================================
-# SLICE CONV INPUT CHANNELS
-# ============================================================
-
-def slice_conv_in(conv, keep_idx):
-    """
-    Project convolution:
-
-        [Cout, Cexp, 1, 1]
-
-    becomes:
-
-        [Cout, Cexp_new, 1, 1]
-    """
-
     new_conv = nn.Conv2d(
-        len(keep_idx),
+        len(idx),
         conv.out_channels,
         conv.kernel_size,
-        stride=conv.stride,
-        padding=conv.padding,
-        dilation=conv.dilation,
-        groups=conv.groups,
-        bias=conv.bias is not None
-    )
+        conv.stride,
+        conv.padding,
+        conv.dilation,
+        conv.groups,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode,
+    ).to(conv.weight.device)
 
-    new_conv.weight.data = (
-        conv.weight.data[:, keep_idx].clone()
+    new_conv.weight.data.copy_(
+        conv.weight.data[:, idx]
     )
 
     if conv.bias is not None:
-        new_conv.bias.data = (
-            conv.bias.data.clone()
-        )
+        new_conv.bias.data.copy_(conv.bias.data)
 
-    return new_conv.to(
-        conv.weight.device
+    return new_conv
+
+
+def slice_depthwise_conv(conv, keep_indices):
+
+    idx = torch.tensor(
+        sorted(keep_indices),
+        dtype=torch.long,
+        device=conv.weight.device
     )
 
-
-# ============================================================
-# SLICE DEPTHWISE CONV
-# ============================================================
-
-def slice_depthwise_conv(conv, keep_idx):
-    """
-    Depthwise convolution:
-
-        [Cexp, 1, K, K]
-
-    becomes:
-
-        [Cexp_new, 1, K, K]
-
-    with:
-
-        in_channels = out_channels = groups = Cexp_new
-    """
-
-    new_channels = len(keep_idx)
+    n = len(idx)
 
     new_conv = nn.Conv2d(
-        new_channels,
-        new_channels,
+        n,
+        n,
         conv.kernel_size,
-        stride=conv.stride,
-        padding=conv.padding,
-        dilation=conv.dilation,
-        groups=new_channels,
-        bias=conv.bias is not None
-    )
+        conv.stride,
+        conv.padding,
+        conv.dilation,
+        groups=n,
+        bias=conv.bias is not None,
+        padding_mode=conv.padding_mode,
+    ).to(conv.weight.device)
 
-    new_conv.weight.data = (
-        conv.weight.data[keep_idx].clone()
-    )
+    new_conv.weight.data.copy_(
+        conv.weight.data[idx])
 
     if conv.bias is not None:
-        new_conv.bias.data = (
-            conv.bias.data[keep_idx].clone()
-        )
+        new_conv.bias.data.copy_(
+            conv.bias.data[idx])
 
-    return new_conv.to(
-        conv.weight.device
+    return new_conv
+
+
+def slice_bn(bn, keep_indices):
+
+    idx = torch.tensor(
+        sorted(keep_indices),
+        dtype=torch.long,
+        device=bn.weight.device
     )
 
-
-# ============================================================
-# SLICE BATCHNORM
-# ============================================================
-
-def slice_bn(bn, keep_idx):
-
     new_bn = nn.BatchNorm2d(
-        len(keep_idx),
+        len(idx),
         eps=bn.eps,
         momentum=bn.momentum,
         affine=bn.affine,
-        track_running_stats=bn.track_running_stats
-    )
+        track_running_stats=bn.track_running_stats,
+    ).to(bn.weight.device)
 
     if bn.affine:
-
-        new_bn.weight.data = (
-            bn.weight.data[keep_idx].clone()
+        new_bn.weight.data.copy_(
+            bn.weight.data[idx]
         )
-
-        new_bn.bias.data = (
-            bn.bias.data[keep_idx].clone()
+        new_bn.bias.data.copy_(
+            bn.bias.data[idx]
         )
 
     if bn.track_running_stats:
-
-        new_bn.running_mean.data = (
-            bn.running_mean.data[keep_idx].clone()
+        new_bn.running_mean.data.copy_(
+            bn.running_mean.data[idx]
+        )
+        new_bn.running_var.data.copy_(
+            bn.running_var.data[idx]
         )
 
-        new_bn.running_var.data = (
-            bn.running_var.data[keep_idx].clone()
-        )
-
-    return new_bn.to(
-        bn.weight.device
-        if bn.affine
-        else next(bn.parameters()).device
-    )
+    return new_bn
 
 
 # ============================================================
 # PRUNE ONE BLOCK
 # ============================================================
 
-def prune_block(block, keep_idx):
-    """
-    Physically shrink the internal expansion dimension.
+def prune_block(block, keep_indices):
 
-    Data path:
+    conv = block.conv
 
-        Cin
-          ↓
-        Cexp
-          ↓
-        Cexp
-          ↓
-        Cout
+    # Expansion
+    expand = conv[0]
 
-    becomes:
-
-        Cin
-          ↓
-        Cexp_new
-          ↓
-        Cexp_new
-          ↓
-        Cout
-    """
-
-    (
-        expand_conv,
-        expand_bn,
-        dw_conv,
-        dw_bn,
-        project_conv
-    ) = get_prune_targets(block)
-
-    n_original = (
-        expand_conv.conv.weight.shape[0]
+    expand[0] = slice_conv_out(
+        expand[0],
+        keep_indices
     )
 
-    # --------------------------------------------------------
-    # Expand: shrink output channels
-    # --------------------------------------------------------
-
-    expand_conv.conv = slice_conv_out(
-        expand_conv.conv,
-        keep_idx
+    expand[1] = slice_bn(
+        expand[1],
+        keep_indices
     )
 
-    # --------------------------------------------------------
-    # Depthwise: shrink input/output/groups
-    # --------------------------------------------------------
+    # Depthwise
+    depthwise = conv[1]
 
-    dw_conv.conv = slice_depthwise_conv(
-        dw_conv.conv,
-        keep_idx
+    depthwise[0] = slice_depthwise_conv(
+        depthwise[0],
+        keep_indices
     )
 
-    # --------------------------------------------------------
-    # Project: shrink input channels
-    # --------------------------------------------------------
-
-    project_conv.conv = slice_conv_in(
-        project_conv.conv,
-        keep_idx
+    depthwise[1] = slice_bn(
+        depthwise[1],
+        keep_indices
     )
 
-    # --------------------------------------------------------
-    # Corresponding BatchNorm layers
-    # --------------------------------------------------------
-
-    block.conv[0][1] = slice_bn(
-        expand_bn,
-        keep_idx
+    # Projection
+    conv[2] = slice_conv_in(
+        conv[2],
+        keep_indices
     )
-
-    block.conv[1][1] = slice_bn(
-        dw_bn,
-        keep_idx
-    )
-
-    return len(keep_idx), n_original
 
 
 # ============================================================
@@ -560,147 +331,104 @@ def prune_block(block, keep_idx):
 def apply_structured_pruning(
     model,
     sparsity,
-    min_keep_ratio=0.25
+    min_keep_ratio=0.25,
 ):
-    """
-    Global importance-based structured pruning.
 
-    Unlike the previous version, we DO NOT prune the same
-    percentage from every block.
+    targets, all_scores = collect_global_importance(model)
 
-    Instead:
-
-        1. Calculate L2 importance per channel.
-        2. Normalize importance within each block.
-        3. Globally rank every channel.
-        4. Prune the least important global channels.
-        5. Keep the remaining channels in each block.
-    """
-
-    (
-        keep_indices,
-        n_pruned,
-        n_total
-    ) = select_global_keep_indices(
-        model,
-        sparsity,
-        min_keep_ratio=min_keep_ratio
-    )
-
-    if n_total == 0:
-
-        print("No eligible expansion channels found.")
-
-        return model, 0.0
-
-    n_blocks_pruned = 0
-    n_kept_total = 0
-    n_original_total = 0
-
-    for name, block in get_inverted_residual_blocks(model):
-
-        if not has_expand_stage(block):
-            continue
-
-        keep_idx = keep_indices[name]
-
-        # Put indices on the same device as the weights.
-        expand_conv, _, _, _, _ = get_prune_targets(block)
-
-        keep_idx = keep_idx.to(
-            expand_conv.conv.weight.device
+    keep_indices, actual_sparsity = (
+        select_global_keep_indices(
+            targets,
+            all_scores,
+            sparsity,
+            min_keep_ratio,
         )
-
-        n_kept, n_original = prune_block(
-            block,
-            keep_idx
-        )
-
-        n_kept_total += n_kept
-        n_original_total += n_original
-
-        n_blocks_pruned += 1
-
-    actual_sparsity = (
-        1.0 -
-        n_kept_total / n_original_total
     )
 
-    print(
-        f"Globally pruned {n_blocks_pruned} blocks | "
-        f"{n_kept_total}/{n_original_total} expand channels kept | "
-        f"{actual_sparsity * 100:.2f}% sparsity"
-    )
+    print("\n" + "=" * 60)
+    print("GLOBAL STRUCTURED PRUNING")
+    print("=" * 60)
 
-    # Show how pruning was distributed.
-    print("\nPer-block pruning:")
-    
-    for name, block in get_inverted_residual_blocks(model):
+    print(f"Requested sparsity : {sparsity:.2%}")
+    print(f"Actual sparsity    : {actual_sparsity:.2%}")
+    print(f"Blocks             : {len(targets)}")
 
-        if not has_expand_stage(block):
-            continue
+    for target in targets:
 
-        keep_idx = keep_indices[name]
+        name = target["name"]
+        block = target["block"]
 
-        # Original count can be recovered from the
-        # number of records for that block.
-        expand_conv, _, _, _, _ = get_prune_targets(block)
-
-        current_channels = expand_conv.conv.out_channels
+        old_n = target["expand"].out_channels
+        keep = keep_indices[name]
 
         print(
-            f"  {name}: "
-            f"kept {len(keep_idx)} channels"
+            f"{name}: "
+            f"{old_n} -> {len(keep)}"
+        )
+
+        prune_block(
+            block,
+            keep
         )
 
     return model, actual_sparsity
 
 
 # ============================================================
-# COMPLETE PIPELINE
+# MAIN PIPELINE
 # ============================================================
 
 def run_structured_pruned_compression(
     checkpoint_path,
-    weight_bits=8,
-    act_bits=4,
+    weight_bits=4,
+    act_bits=8,
     sparsity=0.5,
     min_keep_ratio=0.25,
-
-    num_calib_batches=10,
-
-    quant_finetune_epochs=3,
-    quant_finetune_lr=1e-4,
-
+    qat_epochs=3,
     prune_finetune_epochs=3,
-    prune_finetune_lr=1e-4,
-
-    device="cuda"
+    device=None,
 ):
-    """
-    Complete pipeline:
 
-        FP32 baseline
-             ↓
-        replace with QuantConv/QuantLinear
-             ↓
-        calibration
-             ↓
-        quantization fine-tuning
-             ↓
-        global importance-based structured pruning
-             ↓
-        recalibration
-             ↓
-        pruning fine-tuning
-             ↓
-        recalibration
-             ↓
-        evaluation + size/MAC accounting
-    """
+    if device is None:
+        device = (
+            "cuda"
+            if torch.cuda.is_available()
+            else "cpu"
+        )
+
+    print("\n" + "=" * 70)
+    print("STRUCTURED PRUNING + QUANTIZATION")
+    print("=" * 70)
+
+    print(
+        f"W{weight_bits}A{act_bits} | "
+        f"Sparsity={sparsity:.0%} | "
+        f"MinKeep={min_keep_ratio:.0%}"
+    )
+
 
     # ========================================================
-    # LOAD BASELINE
+    # ORIGINAL MODEL
+    # ========================================================
+
+    # NEVER modify this model.
+    # Used only for correct original-size accounting.
+
+    original_model = baseline()
+
+    original_model.load_state_dict(
+        torch.load(
+            checkpoint_path,
+            map_location=device
+        )
+    )
+
+    original_model = original_model.to(device)
+    original_model.eval()
+
+
+    # ========================================================
+    # WORKING MODEL
     # ========================================================
 
     model = baseline()
@@ -713,181 +441,173 @@ def run_structured_pruned_compression(
     )
 
     model = model.to(device)
-    model.eval()
 
-    train_loader, test_loader = prepare_data()
 
     # ========================================================
     # QUANTIZATION
     # ========================================================
 
-    from compression import (
-        replace_conv_layers,
-        replace_linear_layers
+    model = replace_with_quantized_layers(
+        model,
+        weight_bits=weight_bits,
+        act_bits=act_bits,
     )
 
-    model = replace_conv_layers(
-        model,
-        bits=weight_bits,
-        act_bits=act_bits
-    )
+    model = model.to(device)
 
-    model = replace_linear_layers(
-        model,
-        bits=weight_bits,
-        act_bits=act_bits
-    )
 
     # ========================================================
-    # INITIAL CALIBRATION
+    # CALIBRATION
     # ========================================================
 
-    model = run_calibration(
+    model.eval()
+
+    calibrate_model(
         model,
-        train_loader,
-        bits=act_bits,
-        num_batches=num_calib_batches,
-        device=device
+        device=device,
     )
 
+    enable_activation_quantization(model)
+
+
     # ========================================================
-    # QUANTIZATION FINE-TUNING
+    # QAT
     # ========================================================
 
-    model = finetune_quantized(
+    print("\nStarting QAT...")
+
+    train_model(
         model,
-        train_loader,
-        epochs=quant_finetune_epochs,
-        lr=quant_finetune_lr,
-        device=device
+        epochs=qat_epochs,
+        device=device,
     )
 
-    # Recalibrate after QAT
-    model = run_calibration(
-        model,
-        train_loader,
-        bits=act_bits,
-        num_batches=num_calib_batches,
-        device=device
-    )
 
     # ========================================================
-    # GLOBAL STRUCTURED PRUNING
+    # STRUCTURED PRUNING
     # ========================================================
 
     model, actual_sparsity = apply_structured_pruning(
         model,
         sparsity=sparsity,
-        min_keep_ratio=min_keep_ratio
+        min_keep_ratio=min_keep_ratio,
     )
 
     model = model.to(device)
 
+
     # ========================================================
-    # RECALIBRATION AFTER STRUCTURAL PRUNING
+    # PRUNING FINE-TUNING
     # ========================================================
 
-    model = run_calibration(
+    print("\nStarting pruning fine-tuning...")
+
+    train_model(
         model,
-        train_loader,
-        bits=act_bits,
-        num_batches=num_calib_batches,
-        device=device
-    )
-
-    # ========================================================
-    # FINE-TUNE PRUNED MODEL
-    # ========================================================
-
-    model = finetune_quantized(
-        model,
-        train_loader,
         epochs=prune_finetune_epochs,
-        lr=prune_finetune_lr,
-        device=device
+        device=device,
     )
 
-    # Final calibration
-    model = run_calibration(
+
+    # ========================================================
+    # FINAL CALIBRATION
+    # ========================================================
+
+    model.eval()
+
+    calibrate_model(
         model,
-        train_loader,
-        bits=act_bits,
-        num_batches=num_calib_batches,
-        device=device
+        device=device,
     )
 
+    enable_activation_quantization(model)
+
+
     # ========================================================
-    # EVALUATION
+    # FINAL EVALUATION
     # ========================================================
 
-    eval_results = run_eval(
-        model,
-        test_loader
+    model.eval()
+
+    # --------------------------------------------------------
+    # USE THE SAME TEST LOADER / SAMPLE INPUT CODE THAT
+    # WAS ALREADY IN YOUR ORIGINAL FILE.
+    #
+    # The important part is:
+    #
+    # sample_input = sample_input[:1].to(device)
+    #
+    # --------------------------------------------------------
+
+    with torch.no_grad():
+
+        correct = 0
+        total = 0
+
+        for images, labels in test_loader:
+
+            images = images.to(device)
+            labels = labels.to(device)
+
+            outputs = model(images)
+
+            _, predicted = outputs.max(1)
+
+            total += labels.size(0)
+
+            correct += (
+                predicted == labels
+            ).sum().item()
+
+    accuracy = 100.0 * correct / total
+
+    print(
+        f"\nFinal accuracy: {accuracy:.2f}%"
     )
 
+
     # ========================================================
-    # SIZE / PARAMETER / MAC ACCOUNTING
+    # ACTIVATION SIZE INPUT
     # ========================================================
 
-    sample_input, _ = next(
-        iter(test_loader)
-    )
+    # Take ONE image from the existing test batch.
 
-    # IMPORTANT:
-    # use one image so activation size and MACs
-    # represent a single inference.
-    sample_input = sample_input[:1].to(device)
+    sample_input = images[:1].to(device)
+
+
+    # ========================================================
+    # CORRECT SIZE ACCOUNTING
+    # ========================================================
 
     size_results = compute_model_size(
+        original_model,
         model,
-        sample_input
+        sample_input,
     )
 
+
     # ========================================================
-    # RETURN EVERYTHING
+    # RESULTS
     # ========================================================
 
-    return {
-        **eval_results,
-        **size_results,
-
+    results = {
         "weight_bits": weight_bits,
         "act_bits": act_bits,
 
-        "target_sparsity": sparsity,
+        "sparsity": sparsity,
         "actual_sparsity": actual_sparsity,
 
-        "min_keep_ratio": min_keep_ratio,
+        "accuracy": accuracy,
 
-        "quant_finetune_epochs": quant_finetune_epochs,
-        "prune_finetune_epochs": prune_finetune_epochs,
+        **size_results,
     }
 
 
-# ============================================================
-# TEST RUN
-# ============================================================
+    print("\n" + "=" * 70)
+    print("FINAL RESULTS")
+    print("=" * 70)
 
-if __name__ == "__main__":
+    for key, value in results.items():
+        print(f"{key}: {value}")
 
-    result = run_structured_pruned_compression(
-        "baseline_best.pt",
-
-        weight_bits=4,
-        act_bits=8,
-
-        sparsity=0.5,
-
-        min_keep_ratio=0.25,
-
-        quant_finetune_epochs=3,
-        quant_finetune_lr=1e-4,
-
-        prune_finetune_epochs=3,
-        prune_finetune_lr=1e-4,
-
-        device="cuda"
-    )
-
-    print("\nFinal result:")
-    print(result)
+    return model, results
