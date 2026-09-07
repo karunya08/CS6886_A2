@@ -95,9 +95,7 @@ if __name__ == "__main__":
     model = baseline()
     train_loader, test_loader = prepare_data()
 
-    # Save straight to Drive this time so a session loss doesn't cost you the checkpoint.
-    # Mount Drive first: from google.colab import drive; drive.mount('/content/drive')
-    checkpoint_path = "/content/drive/MyDrive/baseline_best.pt"
+    checkpoint_path = "baseline_best.pt"
 
     model, best_acc = train(model, train_loader, test_loader, num_epochs=20, lr=0.01,
                              checkpoint_path=checkpoint_path)
