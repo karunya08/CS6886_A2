@@ -703,7 +703,16 @@ def run_structured_pruned_compression(
     # LOAD BASELINE
     # ========================================================
 
-    model = baseline()
+    original_model = baseline()
+    original_model.load_state_dict(
+        torch.load(
+            checkpoint_path,
+            map_location=device
+        )
+    )
+    original_model = original_model.to(device)
+    original_model.eval()
+    model = original_model
 
     model.load_state_dict(
         torch.load(
@@ -839,9 +848,10 @@ def run_structured_pruned_compression(
     sample_input = sample_input[:1].to(device)
 
     size_results = compute_model_size(
-        model,
-        sample_input
-    )
+                            original_model,
+                            model,
+                            sample_input
+                        )
 
     # ========================================================
     # RETURN EVERYTHING
