@@ -1,8 +1,10 @@
 import sys
 import wandb
 
-from compress import run_compression
-from sensitivity_aware_pruning  import run_structured_pruned_compression
+from compression import (
+    run_compression,
+    run_structured_pruned_compression
+)
 
 
 CHECKPOINT_PATH = "baseline_best.pt"
@@ -49,7 +51,7 @@ def quant_sweep_run():
 
 
 # ============================================================
-# STRUCTURED PRUNING SWEEP
+# SENSITIVITY-AWARE PRUNING SWEEP
 # ============================================================
 
 pruning_sweep_config = {
@@ -77,14 +79,14 @@ def pruning_sweep_run():
     result = run_structured_pruned_compression(
         CHECKPOINT_PATH,
 
-        # Fixed at your selected quantization configuration
+        # Selected quantization configuration
         weight_bits=4,
         act_bits=8,
 
-        # Swept
+        # Swept pruning parameter
         sparsity=config.sparsity,
 
-        # Fixed
+        # Fixed pruning parameters
         min_keep_ratio=0.25,
 
         num_calib_batches=10,
@@ -108,12 +110,18 @@ def pruning_sweep_run():
 if __name__ == "__main__":
 
     if len(sys.argv) < 2:
+
         print("Usage:")
         print("  python sweep.py quant")
         print("  python sweep.py prune")
+
         sys.exit(1)
 
     mode = sys.argv[1].lower()
+
+    # --------------------------------------------------------
+    # QUANTIZATION SWEEP
+    # --------------------------------------------------------
 
     if mode == "quant":
 
@@ -127,8 +135,11 @@ if __name__ == "__main__":
             function=quant_sweep_run
         )
 
-    elif mode == "prune":
+    # --------------------------------------------------------
+    # SENSITIVITY-AWARE PRUNING SWEEP
+    # --------------------------------------------------------
 
+    elif mode == "prune":
         sweep_id = wandb.sweep(
             pruning_sweep_config,
             project="mobilenetv2-cifar10-compression"
@@ -139,8 +150,11 @@ if __name__ == "__main__":
             function=pruning_sweep_run
         )
 
-    else:
+    # --------------------------------------------------------
+    # INVALID MODE
+    # --------------------------------------------------------
 
+    else:
         print(f"Unknown mode: {mode}")
         print("Use either:")
         print("  python sweep.py quant")
