@@ -1,3 +1,10 @@
+'''Quantization pipeline utilities.
+
+Functions to create a quantized model from a checkpoint, perform
+calibration, QAT fine-tuning, re-calibration, evaluation and size
+accounting. Exposes `run_quantization` and a QAT helper.
+'''
+
 import torch
 import torch.nn as nn
 import torch.optim as optim

@@ -1,4 +1,10 @@
 
+'''Activation calibration helpers.
+
+Collects activation statistics over calibration batches and applies
+computed scales/zero-points to quantized layers in a model.
+'''
+
 from compression.hooks import calibrate_activations
 from compression.quant_layers import apply_calibration
 

@@ -1,5 +1,12 @@
+'''Hooks for activation calibration.
+
+Forward hooks that collect per-layer activation min/max statistics
+used by the calibration utilities.
+'''
+
 import torch
 from compression.quant_ops import calibrate_activation_scale
+
 
 def make_calibration_hook(name, stats_store):
     def hook(module, input, output):

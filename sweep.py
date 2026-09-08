@@ -1,3 +1,9 @@
+'''Sweep runners for hyperparameter search.
+
+Defines WandB sweep configurations and runner functions used to
+explore quantization and pruning hyperparameters for the pipeline.
+'''
+
 import sys
 import torch
 import wandb

@@ -1,3 +1,10 @@
+'''Quantized layer wrappers and utilities.
+
+Defines `QuantConv2d` and `QuantLinear` wrappers, plus helpers
+to replace standard convolutional and linear layers and apply
+calibration results to quantized layers.
+'''
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

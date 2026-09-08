@@ -1,3 +1,10 @@
+'''Baseline model and data utilities.
+
+Defines a MobileNetV2-based baseline for CIFAR-10, data loaders,
+training and evaluation helper functions used by the compression
+pipeline.
+'''
+
 import torch
 import torch.nn as nn
 import torch.optim as optim

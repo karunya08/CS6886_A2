@@ -1,3 +1,9 @@
+'''Model size accounting utilities.
+
+Compute weight and activation memory usage, compression ratios, and
+related statistics for original and compressed models.
+'''
+
 import torch
 from compression import QuantConv2d, QuantLinear
 FP32_BITS = 32

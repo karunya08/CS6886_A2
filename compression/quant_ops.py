@@ -1,4 +1,12 @@
+'''Quantization operator helpers.
+
+Low-level utility functions for fake quantization, computing scales
+and zero points, and quantize/dequantize helpers used by the
+compression layers.
+'''
+
 import torch
+
 
 def get_qmax(bits):
     return 2**(bits - 1) - 1

@@ -1,3 +1,10 @@
+'''Sensitivity-aware structured pruning pipeline.
+
+Utilities to compute channel importances, select global pruning
+targets, slice layer weights and apply structured pruning to
+inverted residual blocks, followed by recalibration and finetune.
+'''
+
 import torch
 import torch.nn as nn
 
