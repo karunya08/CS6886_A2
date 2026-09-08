@@ -187,8 +187,8 @@ def main():
         num_calib_batches=args.quant_calib_batches,
         finetune_epochs=args.quant_epochs,
         finetune_lr=args.quant_lr,
-        momentum=args.quant_momentum,
-        weight_decay=args.quant_weight_decay,
+        finetune_momentum=args.quant_momentum,
+        finetune_weight_decay=args.quant_weight_decay,
         device=device,
     )
 
@@ -209,8 +209,8 @@ def main():
         num_calib_batches=args.prune_calib_batches,
         finetune_epochs=args.prune_epochs,
         finetune_lr=args.prune_lr,
-        momentum=args.prune_momentum,
-        weight_decay=args.prune_weight_decay,
+        finetune_momentum=args.prune_momentum,
+        finetune_weight_decay=args.prune_weight_decay,
         device=device,
     )
 
