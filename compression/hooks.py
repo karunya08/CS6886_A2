@@ -1,4 +1,3 @@
-
 import torch
 from compression.quant_ops import calibrate_activation_scale
 
@@ -25,7 +24,7 @@ def calibrate_activations(model, calib_loader, layers_to_calibrate, bits, num_ba
     model.eval()
 
     for i, (images, _) in enumerate(calib_loader):
-        if(i > num_batches):
+        if(i >= num_batches):
             break
         images = images.to(device)
         model(images)

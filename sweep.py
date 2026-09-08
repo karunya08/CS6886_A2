@@ -1,13 +1,16 @@
 import sys
+import torch
 import wandb
 
-from compression import (
-    run_compression,
-    run_structured_pruned_compression
-)
+from baseline import baseline, prepare_data
+from pipeline.quant import run_quantization
+from pipeline.prune import run_pruning
 
 
 CHECKPOINT_PATH = "baseline_best.pt"
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+PROJECT_NAME = "mobilenetv2-cifar10-compression"
 
 
 # ============================================================
@@ -40,11 +43,20 @@ def quant_sweep_run():
 
     config = wandb.config
 
-    result = run_compression(
+    _, result = run_quantization(
         CHECKPOINT_PATH,
+
         weight_bits=config.weight_bits,
         act_bits=config.act_bits,
+
+        num_calib_batches=10,
+
         finetune_epochs=2,
+        finetune_lr=1e-4,
+        finetune_momentum=0.9,
+        finetune_weight_decay=0.0,
+
+        device=DEVICE
     )
 
     wandb.log(result)
@@ -76,29 +88,88 @@ def pruning_sweep_run():
 
     config = wandb.config
 
-    result = run_structured_pruned_compression(
+    # --------------------------------------------------------
+    # PREPARE DATA
+    # --------------------------------------------------------
+
+    train_loader, test_loader = prepare_data()
+
+    # --------------------------------------------------------
+    # LOAD ORIGINAL FP32 MODEL
+    # --------------------------------------------------------
+
+    original_model = baseline()
+
+    original_model.load_state_dict(
+        torch.load(
+            CHECKPOINT_PATH,
+            map_location=DEVICE
+        )
+    )
+
+    original_model = original_model.to(DEVICE)
+    original_model.eval()
+
+    # --------------------------------------------------------
+    # STAGE 1: FIXED W4A8 QUANTIZATION
+    # --------------------------------------------------------
+
+    quantized_model, quant_results = run_quantization(
         CHECKPOINT_PATH,
 
-        # Selected quantization configuration
         weight_bits=4,
         act_bits=8,
 
-        # Swept pruning parameter
+        num_calib_batches=10,
+
+        finetune_epochs=3,
+        finetune_lr=1e-4,
+        finetune_momentum=0.9,
+        finetune_weight_decay=0.0,
+
+        device=DEVICE
+    )
+
+    # --------------------------------------------------------
+    # STAGE 2: SENSITIVITY-AWARE STRUCTURED PRUNING
+    # --------------------------------------------------------
+
+    pruned_model, prune_results = run_pruning(
+        model=quantized_model,
+
+        original_model=original_model,
+
+        train_loader=train_loader,
+        test_loader=test_loader,
+
         sparsity=config.sparsity,
 
-        # Fixed pruning parameters
         min_keep_ratio=0.25,
+
+        act_bits=8,
 
         num_calib_batches=10,
 
-        quant_finetune_epochs=3,
-        quant_finetune_lr=1e-4,
+        finetune_epochs=3,
+        finetune_lr=1e-4,
+        finetune_momentum=0.9,
+        finetune_weight_decay=0.0,
 
-        prune_finetune_epochs=3,
-        prune_finetune_lr=1e-4,
-
-        device="cuda"
+        device=DEVICE
     )
+
+    # --------------------------------------------------------
+    # COMBINE RESULTS
+    # --------------------------------------------------------
+
+    result = {
+        **quant_results,
+        **prune_results,
+
+        "weight_bits": 4,
+        "act_bits": 8,
+        "sparsity": config.sparsity
+    }
 
     wandb.log(result)
 
@@ -127,7 +198,7 @@ if __name__ == "__main__":
 
         sweep_id = wandb.sweep(
             quant_sweep_config,
-            project="mobilenetv2-cifar10-compression"
+            project=PROJECT_NAME
         )
 
         wandb.agent(
@@ -140,9 +211,10 @@ if __name__ == "__main__":
     # --------------------------------------------------------
 
     elif mode == "prune":
+
         sweep_id = wandb.sweep(
             pruning_sweep_config,
-            project="mobilenetv2-cifar10-compression"
+            project=PROJECT_NAME
         )
 
         wandb.agent(
@@ -155,6 +227,7 @@ if __name__ == "__main__":
     # --------------------------------------------------------
 
     else:
+
         print(f"Unknown mode: {mode}")
         print("Use either:")
         print("  python sweep.py quant")
