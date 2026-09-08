@@ -213,7 +213,6 @@ python compression.py --weight-bits 4 --act-bits 8 --sparsity 0.25
 
 The repository includes two W&B sweeps:
 
-
 Run:
 
 ```bash
@@ -222,33 +221,6 @@ python sweep.py quant
 
 ```bash
 python sweep.py prune
-```
-
-
-# Recommended Workflow
-
-First run the quantization sweep:
-
-```bash
-python sweep.py quant
-```
-
-Use the resulting accuracy–compression trade-off to select the quantization configuration.
-
-For the current pipeline, **W4A8** is used for the pruning stage.
-
-Then run the pruning sweep:
-
-```bash
-python sweep.py prune
-```
-
-This evaluates the effect of increasing structured sparsity.
-
-Individual configurations can then be reproduced directly using:
-
-```bash
-python compression.py --weight-bits 4 --act-bits 8 --sparsity 0.50
 ```
 
 ---
@@ -265,12 +237,6 @@ python compression.py \
     --weight-bits 4 \
     --act-bits 8 \
     --sparsity 0.50
-```
-
-Supported weight and activation bit-widths are:
-
-```text
-2, 4, 8
 ```
 
 The pruning sparsity can be configured independently.
