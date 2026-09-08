@@ -77,17 +77,13 @@ def finetune_quantized(
 
 def run_quantization(
     checkpoint_path,
-
     weight_bits=4,
     act_bits=8,
-
     num_calib_batches=10,
-
     finetune_epochs=3,
     finetune_lr=1e-4,
     finetune_momentum=0.9,
     finetune_weight_decay=0.0,
-
     device="cuda"
 ):
     """

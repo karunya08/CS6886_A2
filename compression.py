@@ -182,8 +182,6 @@ def main():
 
     quantized_model, quant_results = run_quantization(
         checkpoint_path=args.checkpoint,
-        train_loader=train_loader,
-        test_loader=test_loader,
         weight_bits=args.weight_bits,
         act_bits=args.act_bits,
         num_calib_batches=args.quant_calib_batches,

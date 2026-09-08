@@ -29,7 +29,6 @@ def has_expand_stage(block):
 # ============================================================
 
 def get_prune_targets(block):
-
     expand_conv = block.conv[0][0]
     expand_bn = block.conv[0][1]
 
@@ -94,32 +93,18 @@ def collect_global_importance(model):
 # SELECT CHANNELS
 # ============================================================
 
-def select_global_keep_indices(
-    model,
-    sparsity,
-    min_keep_ratio=0.25
-):
-
+def select_global_keep_indices(model, sparsity, min_keep_ratio=0.25):
     records = collect_global_importance(model)
 
     if not records:
         return {}, 0, 0
 
     n_total = len(records)
-
-    n_to_prune = int(
-        round(sparsity * n_total)
-    )
+    n_to_prune = int(round(sparsity * n_total))
 
     block_sizes = {}
-
     for _, block_name, _ in records:
-
-        block_sizes.setdefault(
-            block_name,
-            0
-        )
-
+        block_sizes.setdefault(block_name, 0)
         block_sizes[block_name] += 1
 
     min_keep = {
@@ -132,53 +117,30 @@ def select_global_keep_indices(
         for name, size in block_sizes.items()
     }
 
-    records.sort(
-        key=lambda x: x[0]
-    )
+    records.sort(key=lambda x: x[0])
 
-    prune_by_block = {
-        name: set()
-        for name in block_sizes
-    }
+    prune_by_block = {name: set() for name in block_sizes}
 
-    current_keep = {
-        name: size
-        for name, size in block_sizes.items()
-    }
+    current_keep = {name: size for name, size in block_sizes.items()}
 
     n_pruned = 0
-
     for _, block_name, channel_idx in records:
-
         if n_pruned >= n_to_prune:
             break
 
-        if (
-            current_keep[block_name]
-            <= min_keep[block_name]
-        ):
+        if (current_keep[block_name] <= min_keep[block_name]):
             continue
 
-        prune_by_block[block_name].add(
-            channel_idx
-        )
-
+        prune_by_block[block_name].add(channel_idx)
         current_keep[block_name] -= 1
-
         n_pruned += 1
 
     keep_indices = {}
 
     for block_name, n_channels in block_sizes.items():
-
         prune_set = prune_by_block[block_name]
 
-        keep = [
-            idx
-            for idx in range(n_channels)
-            if idx not in prune_set
-        ]
-
+        keep = [idx for idx in range(n_channels) if idx not in prune_set]
         keep_indices[block_name] = torch.tensor(
             keep,
             dtype=torch.long
@@ -208,19 +170,12 @@ def slice_conv_out(conv, keep_idx):
         bias=conv.bias is not None
     )
 
-    new_conv.weight.data = (
-        conv.weight.data[keep_idx].clone()
-    )
+    new_conv.weight.data = (conv.weight.data[keep_idx].clone())
 
     if conv.bias is not None:
+        new_conv.bias.data = (conv.bias.data[keep_idx].clone())
 
-        new_conv.bias.data = (
-            conv.bias.data[keep_idx].clone()
-        )
-
-    return new_conv.to(
-        conv.weight.device
-    )
+    return new_conv.to(conv.weight.device)
 
 
 # ============================================================
@@ -240,19 +195,12 @@ def slice_conv_in(conv, keep_idx):
         bias=conv.bias is not None
     )
 
-    new_conv.weight.data = (
-        conv.weight.data[:, keep_idx].clone()
-    )
+    new_conv.weight.data = (conv.weight.data[:, keep_idx].clone())
 
     if conv.bias is not None:
+        new_conv.bias.data = (conv.bias.data.clone())
 
-        new_conv.bias.data = (
-            conv.bias.data.clone()
-        )
-
-    return new_conv.to(
-        conv.weight.device
-    )
+    return new_conv.to(conv.weight.device)
 
 
 # ============================================================
@@ -274,19 +222,12 @@ def slice_depthwise_conv(conv, keep_idx):
         bias=conv.bias is not None
     )
 
-    new_conv.weight.data = (
-        conv.weight.data[keep_idx].clone()
-    )
+    new_conv.weight.data = (conv.weight.data[keep_idx].clone())
 
     if conv.bias is not None:
+        new_conv.bias.data = (conv.bias.data[keep_idx].clone())
 
-        new_conv.bias.data = (
-            conv.bias.data[keep_idx].clone()
-        )
-
-    return new_conv.to(
-        conv.weight.device
-    )
+    return new_conv.to(conv.weight.device)
 
 
 # ============================================================
@@ -304,28 +245,14 @@ def slice_bn(bn, keep_idx):
     )
 
     if bn.affine:
-
-        new_bn.weight.data = (
-            bn.weight.data[keep_idx].clone()
-        )
-
-        new_bn.bias.data = (
-            bn.bias.data[keep_idx].clone()
-        )
+        new_bn.weight.data = (bn.weight.data[keep_idx].clone())
+        new_bn.bias.data = (bn.bias.data[keep_idx].clone())
 
     if bn.track_running_stats:
+        new_bn.running_mean.data = (bn.running_mean.data[keep_idx].clone())
+        new_bn.running_var.data = (bn.running_var.data[keep_idx].clone())
 
-        new_bn.running_mean.data = (
-            bn.running_mean.data[keep_idx].clone()
-        )
-
-        new_bn.running_var.data = (
-            bn.running_var.data[keep_idx].clone()
-        )
-
-    return new_bn.to(
-        keep_idx.device
-    )
+    return new_bn.to(keep_idx.device)
 
 
 # ============================================================
@@ -333,7 +260,6 @@ def slice_bn(bn, keep_idx):
 # ============================================================
 
 def prune_block(block, keep_idx):
-
     (
         expand_conv,
         expand_bn,
@@ -342,38 +268,20 @@ def prune_block(block, keep_idx):
         project_conv
     ) = get_prune_targets(block)
 
-    n_original = (
-        expand_conv.conv.weight.shape[0]
-    )
+    n_original = (expand_conv.conv.weight.shape[0])
 
     # Expand
-    expand_conv.conv = slice_conv_out(
-        expand_conv.conv,
-        keep_idx
-    )
+    expand_conv.conv = slice_conv_out(expand_conv.conv, keep_idx)
 
     # Depthwise
-    dw_conv.conv = slice_depthwise_conv(
-        dw_conv.conv,
-        keep_idx
-    )
+    dw_conv.conv = slice_depthwise_conv(dw_conv.conv, keep_idx)
 
     # Projection
-    project_conv.conv = slice_conv_in(
-        project_conv.conv,
-        keep_idx
-    )
+    project_conv.conv = slice_conv_in(project_conv.conv, keep_idx)
 
     # BatchNorm
-    block.conv[0][1] = slice_bn(
-        expand_bn,
-        keep_idx
-    )
-
-    block.conv[1][1] = slice_bn(
-        dw_bn,
-        keep_idx
-    )
+    block.conv[0][1] = slice_bn(expand_bn, keep_idx)
+    block.conv[1][1] = slice_bn(dw_bn, keep_idx)
 
     return len(keep_idx), n_original
 
@@ -387,21 +295,14 @@ def apply_structured_pruning(
     sparsity,
     min_keep_ratio=0.25
 ):
-
     (
         keep_indices,
         n_pruned,
         n_total
-    ) = select_global_keep_indices(
-        model,
-        sparsity,
-        min_keep_ratio
-    )
+    ) = select_global_keep_indices(model, sparsity, min_keep_ratio)
 
     if n_total == 0:
-
         print("No eligible expansion channels found.")
-
         return model, 0.0
 
     n_kept_total = 0
@@ -409,24 +310,15 @@ def apply_structured_pruning(
     n_blocks = 0
 
     for name, block in get_inverted_residual_blocks(model):
-
         if not has_expand_stage(block):
             continue
 
         keep_idx = keep_indices[name]
+        expand_conv, _, _, _, _ = (get_prune_targets(block))
 
-        expand_conv, _, _, _, _ = (
-            get_prune_targets(block)
-        )
+        keep_idx = keep_idx.to(expand_conv.conv.weight.device)
 
-        keep_idx = keep_idx.to(
-            expand_conv.conv.weight.device
-        )
-
-        n_kept, n_original = prune_block(
-            block,
-            keep_idx
-        )
+        n_kept, n_original = prune_block(block, keep_idx)
 
         n_kept_total += n_kept
         n_original_total += n_original
@@ -529,26 +421,16 @@ def run_pruning(
     # EVALUATION
     # --------------------------------------------------------
 
-    eval_results = run_eval(
-        model,
-        test_loader
-    )
+    eval_results = run_eval(model, test_loader)
 
     # --------------------------------------------------------
     # SIZE ACCOUNTING
     # --------------------------------------------------------
 
-    sample_input, _ = next(
-        iter(test_loader)
-    )
-
+    sample_input, _ = next(iter(test_loader))
     sample_input = sample_input[:1].to(device)
 
-    size_results = compute_model_size(
-        original_model,
-        model,
-        sample_input
-    )
+    size_results = compute_model_size(original_model, model, sample_input)
 
     results = {
         **eval_results,
