@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import copy
 
 from baseline import baseline, prepare_data
 from calibrate import run_calibration
@@ -712,7 +713,7 @@ def run_structured_pruned_compression(
     )
     original_model = original_model.to(device)
     original_model.eval()
-    model = original_model
+    model = copy.deepcopy(original_model)
 
     model.load_state_dict(
         torch.load(
