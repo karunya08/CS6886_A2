@@ -1,7 +1,7 @@
 '''Top-level compression pipeline CLI.
 
 Entrypoint script that runs quantization followed by
-sensitivity-aware structured pruning and prints final results.
+global importance based structured pruning and prints final results.
 '''
 
 import argparse
